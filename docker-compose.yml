@@ -1,0 +1,130 @@
+version: '3.9'
+
+# =====================================================
+# QueueCore — Docker Compose
+# Runs: MongoDB, Redis, Backend (Node.js), Frontend (Nginx)
+#
+# Usage:
+#   docker compose up --build        # First run
+#   docker compose up -d             # Detached mode
+#   docker compose logs -f backend   # Tail backend logs
+#   WORKER_COUNT=5 docker compose up # Override worker count
+# =====================================================
+
+services:
+
+  # ─── MongoDB ───────────────────────────────────────
+  mongo:
+    image: mongo:7
+    container_name: queuecore-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: queuecore
+    volumes:
+      - mongo_data:/data/db
+      - mongo_config:/data/configdb
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - queuecore-net
+
+  # ─── Redis ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: queuecore-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - queuecore-net
+
+  # ─── Backend ───────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: queuecore-backend
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      MONGO_URI: mongodb://mongo:27017/queuecore
+      JWT_SECRET: ${JWT_SECRET:-queuecore_jwt_secret_change_in_prod}
+      JWT_EXPIRES_IN: 7d
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-queuecore_refresh_secret_change_in_prod}
+      JWT_REFRESH_EXPIRES_IN: 30d
+      REDIS_ENABLED: "true"
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      WORKER_COUNT: ${WORKER_COUNT:-3}
+      WORKER_POLL_INTERVAL_MS: 1000
+      WORKER_HEARTBEAT_INTERVAL_MS: 10000
+      WORKER_VISIBILITY_TIMEOUT_MS: 30000
+      SCHEDULER_INTERVAL_MS: 5000
+      RATE_LIMIT_WINDOW_MS: 900000
+      RATE_LIMIT_MAX: 100
+      CIRCUIT_BREAKER_THRESHOLD: 5
+      CIRCUIT_BREAKER_COOLDOWN_MS: 60000
+      LOG_LEVEL: info
+      SWAGGER_ENABLED: "true"
+      FRONTEND_URL: http://localhost:80
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - backend_logs:/app/logs
+    networks:
+      - queuecore-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ─── Frontend ──────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: queuecore-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - queuecore-net
+
+# ─── Networks ────────────────────────────────────────
+networks:
+  queuecore-net:
+    driver: bridge
+
+# ─── Volumes ─────────────────────────────────────────
+volumes:
+  mongo_data:
+    driver: local
+  mongo_config:
+    driver: local
+  redis_data:
+    driver: local
+  backend_logs:
+    driver: local
